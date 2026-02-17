@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Chat</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; margin: 0; display: flex; justify-content: center; height: 100vh; }
+        .chat-container { width: 100%; max-width: 800px; background: white; display: flex; flex-direction: column; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .header { background: #333; color: white; padding: 15px; text-align: center; font-weight: bold; }
+        #chat-log { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
+        .message { padding: 10px 15px; border-radius: 8px; max-width: 80%; line-height: 1.5; word-wrap: break-word; }
+        .user-msg { align-self: flex-end; background-color: #007bff; color: white; }
+        .bot-msg { align-self: flex-start; background-color: #e9ecef; color: #333; white-space: pre-wrap; }
+        .input-area { padding: 20px; border-top: 1px solid #ddd; display: flex; gap: 10px; background: #fff; }
+        textarea { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; resize: none; height: 50px; font-family: inherit; }
+        button { padding: 0 25px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #218838; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .loading { font-style: italic; color: #666; font-size: 0.9em; margin-left: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <div class="header">Local Agent Interface</div>
+    <div id="chat-log">
+        <div class="message bot-msg">Hello! I am ready to help. You can ask me questions or ask me to use my tools.</div>
+    </div>
+    <div class="input-area">
+        <textarea id="user-input" placeholder="Type your message..." onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }"></textarea>
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    const chatLog = document.getElementById('chat-log');
+    const userInput = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+
+    async function sendMessage() {
+        const text = userInput.value.trim();
+        if (!text) return;
+
+        // Add user message to UI
+        appendMessage(text, 'user-msg');
+        userInput.value = '';
+        userInput.disabled = true;
+        sendBtn.disabled = true;
+
+        // Add loading indicator
+        const loadingId = 'loading-' + Date.now();
+        const loadingDiv = document.createElement('div');
+        loadingDiv.id = loadingId;
+        loadingDiv.className = 'loading';
+        loadingDiv.textContent = 'Agent is thinking (and checking tools)...';
+        chatLog.appendChild(loadingDiv);
+        chatLog.scrollTop = chatLog.scrollHeight;
+
+        try {
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: text })
+            });
+
+            const data = await response.json();
+            
+            // Remove loading
+            document.getElementById(loadingId).remove();
+
+            if (data.response) {
+                appendMessage(data.response, 'bot-msg');
+            } else {
+                appendMessage("[Error: Empty response]", 'bot-msg');
+            }
+        } catch (error) {
+            document.getElementById(loadingId).remove();
+            appendMessage(`[Error: ${error.message}]`, 'bot-msg');
+        } finally {
+            userInput.disabled = false;
+            sendBtn.disabled = false;
+            userInput.focus();
+        }
+    }
+
+    function appendMessage(text, className) {
+        const div = document.createElement('div');
+        div.className = `message ${className}`;
+        div.textContent = text;
+        chatLog.appendChild(div);
+        chatLog.scrollTop = chatLog.scrollHeight;
+    }
+</script>
+
+</body>
+</html>
