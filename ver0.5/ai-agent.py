@@ -3,31 +3,37 @@ import json
 import time
 import os
 import importlib
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import uuid
+import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 # ====================== GLOBAL CONFIG & HISTORY ======================
 WEB_PORT = 8000
 TIMEOUT = 600
 MAX_RETRIES = 3
+MAX_HISTORY = 20  # Keep only the last N messages to prevent context overflow
 
-# Default values (local Llama)
+# Default values (Compatible with Llama.cpp / Oobabooga / vLLM)
 API_URL = "http://127.0.0.1:8080/v1/chat/completions"
 MODEL = "llama-3.1-8b-instruct"
 API_KEY = ""
 
+# Initial System Prompt
 HISTORY = [
     {
         "role": "system",
-        "content": "You are an expert helpful assistant.\n"
-                   "When user asks for multiple items, call the tool multiple times in parallel.\n"
-                   "For complex problems use tools sequentially if needed.\n"
-                   "Always give final answer after tools."
+        "content": (
+            "You are an expert helpful assistant.\n"
+            "When a user asks for multiple items, call the tool multiple times in parallel.\n"
+            "For complex problems use tools sequentially if needed.\n"
+            "Always give a final answer after tools have finished."
+        )
     }
 ]
 
 TOOL_INTERACTIONS = []
-
 
 def update_config(new_url, new_model, new_key):
     global API_URL, MODEL, API_KEY
@@ -36,16 +42,25 @@ def update_config(new_url, new_model, new_key):
     API_KEY = new_key.strip()
     print(f"✅ Config updated → URL: {API_URL} | Model: {MODEL}")
 
+def trim_history():
+    """Keeps the system prompt + last N messages."""
+    global HISTORY
+    if len(HISTORY) > MAX_HISTORY:
+        # Keep system prompt (index 0) + last (MAX_HISTORY - 1) messages
+        HISTORY = [HISTORY[0]] + HISTORY[-(MAX_HISTORY - 1):]
 
 # ====================== TOOL LOADER ======================
 def load_tools():
     tools = {}
     schemas = []
+    # Look for *_tool.py files in the current directory
     for filename in os.listdir('.'):
         if filename.endswith('_tool.py'):
             module_name = filename[:-3]
             try:
                 module = importlib.import_module(module_name)
+                # Reload module to catch updates if code changed while running
+                importlib.reload(module)
                 if hasattr(module, 'schema'):
                     sch = module.schema
                     tool_name = sch['function']['name']
@@ -57,12 +72,10 @@ def load_tools():
                 print(f"   Failed to load {filename}: {e}")
     return tools, schemas
 
-
 TOOLS, TOOLS_SCHEMAS = load_tools()
 print(f"✅ Loaded {len(TOOLS)} tools\n")
 
-
-# ====================== STREAMING ======================
+# ====================== STREAMING LOGIC ======================
 def stream_model(messages, send_func=None):
     payload = {
         "model": MODEL,
@@ -80,8 +93,9 @@ def stream_model(messages, send_func=None):
         headers["Authorization"] = f"Bearer {API_KEY}"
 
     conn_type = "Cloud API" if API_KEY else "Local Server"
+    status_msg = f"data: Connecting to {conn_type}...\n\n"
     if send_func:
-        send_func(f"data: Connecting to {conn_type}...\n\n")
+        send_func(status_msg)
     else:
         print(f"\nConnecting to {conn_type}...", end="", flush=True)
 
@@ -96,11 +110,8 @@ def stream_model(messages, send_func=None):
             with requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=TIMEOUT) as resp:
                 resp.raise_for_status()
 
-                if send_func:
-                    send_func("data: Connected ✓\n\n")
-                else:
-                    print(" Connected ✓", flush=True)
-                    print("Assistant: ", end="", flush=True)
+                if send_func: send_func("data: Connected ✓\n\n")
+                else: print(" Connected ✓")
 
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
@@ -113,162 +124,141 @@ def stream_model(messages, send_func=None):
                     except json.JSONDecodeError:
                         continue
 
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    if not chunk.get("choices"): continue
+                    delta = chunk["choices"][0].get("delta", {})
 
-                    if delta.get("content") is not None:
+                    # Handle Content
+                    if delta.get("content"):
                         token = delta["content"]
-                        if start_time is None:
-                            start_time = time.time()
+                        if start_time is None: start_time = time.time()
                         accumulated_content += token
                         token_count += 1
-                        if send_func:
-                            send_func(f"data: {token}\n\n")
-                        else:
-                            print(token, end="", flush=True)
+                        if send_func: send_func(f"data: {token}\n\n")
+                        else: print(token, end="", flush=True)
 
+                    # Handle Tool Calls (Standard)
                     if "tool_calls" in delta:
                         for tc_delta in delta.get("tool_calls", []):
                             idx = tc_delta.get("index", 0)
                             while len(accumulated_tool_calls) <= idx:
-                                accumulated_tool_calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                                accumulated_tool_calls.append({
+                                    "id": "", 
+                                    "type": "function", 
+                                    "function": {"name": "", "arguments": ""}
+                                })
                             tc = accumulated_tool_calls[idx]
-                            if "id" in tc_delta:
-                                tc["id"] += tc_delta.get("id", "")
+                            if "id" in tc_delta: tc["id"] += tc_delta.get("id", "")
                             if "function" in tc_delta:
                                 f = tc_delta["function"]
                                 if f.get("name"): tc["function"]["name"] += f.get("name", "")
                                 if f.get("arguments"): tc["function"]["arguments"] += f.get("arguments", "")
 
+                    # Handle Deprecated Function Call
                     if "function_call" in delta:
                         fc = delta["function_call"]
-                        if "name" in fc:
-                            accumulated_function_call["name"] += fc.get("name", "")
-                        if "arguments" in fc:
-                            accumulated_function_call["arguments"] += fc.get("arguments", "")
+                        if "name" in fc: accumulated_function_call["name"] += fc.get("name", "")
+                        if "arguments" in fc: accumulated_function_call["arguments"] += fc.get("arguments", "")
 
-                break
+                break # Success, exit retry loop
 
         except Exception as e:
             if attempt == MAX_RETRIES - 1:
                 err = f"Connection failed: {e}"
-                if send_func:
-                    send_func(f"data: {err}\n\n")
-                else:
-                    print(" Failed ✗")
-                    print(f"   [{err}]")
+                if send_func: send_func(f"data: {err}\n\n")
+                else: print(f" Failed ✗ [{err}]")
                 accumulated_content = err
                 break
-            wait = (2 ** attempt) * 1.5
-            if send_func:
-                send_func(f"data: Retry {attempt+1}/{MAX_RETRIES} in {wait:.1f}s...\n\n")
-            else:
-                print(f" Failed (retry {attempt+1}/{MAX_RETRIES} in {wait:.1f}s)", flush=True)
-            time.sleep(wait)
-            if not send_func:
-                print("Connecting...", end="", flush=True)
+            time.sleep((2 ** attempt) * 1)
 
-    if token_count > 3 and start_time is not None:
-        speed = token_count / (time.time() - start_time)
-        speed_str = f"  ({speed:.1f} tokens/s)"
-        if send_func:
-            send_func(f"data: {speed_str}\n\n")
-        else:
-            print(speed_str, end="")
-
-    if not send_func:
-        print()
-
-    accumulated_content = accumulated_content.strip().encode('utf-8', 'ignore').decode('utf-8')
+    if not send_func: print()
 
     msg = {"role": "assistant", "content": accumulated_content or None}
 
+    # Normalize tool calls
     if accumulated_tool_calls:
+        # Filter out empty calls
         clean = [tc for tc in accumulated_tool_calls if tc["function"]["name"]]
-        if clean:
-            msg["tool_calls"] = clean
+        if clean: msg["tool_calls"] = clean
     elif accumulated_function_call["name"]:
-        msg["function_call"] = accumulated_function_call
+        # Convert legacy function_call to modern tool_calls
+        msg["tool_calls"] = [{
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": accumulated_function_call
+        }]
 
     return msg
 
-
 # ====================== CONVERSATION TURN ======================
 def process_turn(history, send_func=None):
+    trim_history()
     step = 0
-    max_steps = 20
+    max_steps = 10 # Prevent infinite loops
+    
     while step < max_steps:
         step += 1
         assistant_msg = stream_model(history, send_func)
+        
+        # --- ID RECOVERY LOGIC ---
+        # Local models sometimes forget to generate IDs. We must ensure they exist.
+        if assistant_msg.get("tool_calls"):
+            for tc in assistant_msg["tool_calls"]:
+                if not tc.get("id"):
+                    tc["id"] = f"call_{uuid.uuid4().hex[:8]}"
+        
         history.append(assistant_msg)
 
-        tool_calls = assistant_msg.get("tool_calls")
-        function_call = assistant_msg.get("function_call")
+        tool_calls = assistant_msg.get("tool_calls", [])
 
-        if not tool_calls and not function_call:
+        if not tool_calls:
             return assistant_msg.get("content", "")
 
-        if send_func:
-            send_func("data: 🔧 Tool(s) being used...\n\n")
-        else:
-            print("\n   🔧 Tool(s) being used...\n")
+        if send_func: send_func("data: 🔧 Tool(s) being used...\n\n")
+        else: print("\n   🔧 Tool(s) being used...")
 
-        calls = tool_calls or ([{"function": function_call}] if function_call else [])
-
-        for tc in calls:
+        # Execute tools
+        for tc in tool_calls:
+            call_id = tc["id"]
             fname = tc["function"]["name"]
+            args_str = tc["function"]["arguments"]
+            
             try:
-                args = json.loads(tc["function"]["arguments"])
-            except:
-                args = {}
+                args = json.loads(args_str)
+            except json.JSONDecodeError:
+                # Fallback: sometimes local models leave trailing commas
+                try: 
+                    import re
+                    clean_args = re.sub(r',\s*([\]}])', r'\1', args_str)
+                    args = json.loads(clean_args)
+                except:
+                    args = {"error": "JSON parse failed", "raw": args_str}
 
-            short_report = f"🔧 Used tool: {fname}({args})"
-            if send_func:
-                send_func(f"data: {short_report}\n\n")
+            short_report = f"🔧 {fname}({args})"
+            if send_func: send_func(f"data: {short_report}\n\n")
+            else: print(f"   {short_report}")
+
+            # CALL THE TOOL
+            if fname in TOOLS:
+                try:
+                    result = TOOLS[fname](**args)
+                except Exception as e:
+                    result = {"error": str(e)}
             else:
-                print(f"   {short_report}")
-
-            result = TOOLS.get(fname)(**args) if fname in TOOLS else {"error": "Unknown tool"}
+                result = {"error": f"Tool '{fname}' not found"}
 
             TOOL_INTERACTIONS.append({
-                "tool": fname,
-                "args": args,
-                "result": result,
-                "time": time.strftime("%H:%M:%S")
+                "tool": fname, "args": args, "result": result, "time": time.strftime("%H:%M:%S")
             })
 
-        history.extend([{
-            "role": "tool",
-            "tool_call_id": tc.get("id", "call_1"),
-            "name": tc["function"]["name"],
-            "content": json.dumps(result)
-        } for tc in calls])
+            # Append result to history
+            history.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": fname,
+                "content": json.dumps(result)
+            })
 
     return ""
-
-
-# ====================== TOOL TEST ======================
-def test_single_tool():
-    print("\n=== Tool Tester ===")
-    print("Available tools:", list(TOOLS.keys()))
-    name = input("Tool name (empty to cancel): ").strip()
-    if not name or name not in TOOLS:
-        return
-    args_str = input("Arguments as JSON (empty = {}): ").strip()
-    try:
-        args = json.loads(args_str) if args_str else {}
-    except:
-        args = {}
-    print(f"Calling {name}...")
-    result = TOOLS[name](**args)
-    print("Result:")
-    print(json.dumps(result, indent=4))
-    TOOL_INTERACTIONS.append({
-        "tool": name,
-        "args": args,
-        "result": result,
-        "time": time.strftime("%H:%M:%S")
-    })
-
 
 # ====================== HTTP HANDLER ======================
 class Handler(BaseHTTPRequestHandler):
@@ -283,70 +273,60 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header('Content-type', 'text/html')
                     self.end_headers()
                     self.wfile.write(f.read())
-            except:
+            except FileNotFoundError:
                 self.send_response(404)
                 self.end_headers()
+                self.wfile.write(b"index.html not found")
+                
         elif path == '/tools':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(list(TOOLS.keys())).encode())
+            self.send_json(list(TOOLS.keys()))
+            
         elif path == '/tool-log':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(TOOL_INTERACTIONS, default=str).encode())
+            self.send_json(TOOL_INTERACTIONS)
+            
         elif path == '/config':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
             data = {"url": API_URL, "model": MODEL, "key": "******" if API_KEY else ""}
-            self.wfile.write(json.dumps(data).encode())
+            self.send_json(data)
+            
         elif path.startswith('/chat'):
-            prompt = parse_qs(parsed.query).get('prompt', [''])[0].strip()
-            if not prompt:
-                self.send_response(400)
-                self.end_headers()
-                return
+            query = parse_qs(parsed.query)
+            prompt = query.get('prompt', [''])[0].strip()
+            
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
 
+            # Robust send function that handles client disconnects
             def send(line):
                 try:
                     self.wfile.write((line + "\n\n").encode('utf-8'))
                     self.wfile.flush()
-                except:
-                    pass
+                except (ConnectionResetError, BrokenPipeError):
+                    pass # Client disconnected, just stop writing
 
-            HISTORY.append({"role": "user", "content": prompt})
-            process_turn(HISTORY, send_func=send)
+            if prompt:
+                HISTORY.append({"role": "user", "content": prompt})
+                process_turn(HISTORY, send_func=send)
+            
             send("data: [DONE]\n\n")
+
         elif path.startswith('/test'):
             query = parse_qs(parsed.query)
             tool = query.get('tool', [''])[0]
             args_str = query.get('args', ['{}'])[0]
-            try:
-                args = json.loads(args_str)
-            except:
-                args = {}
+            try: args = json.loads(args_str)
+            except: args = {}
+            
             if tool in TOOLS:
                 result = TOOLS[tool](**args)
                 TOOL_INTERACTIONS.append({
-                    "tool": tool,
-                    "args": args,
-                    "result": result,
-                    "time": time.strftime("%H:%M:%S")
+                    "tool": tool, "args": args, "result": result, "time": time.strftime("%H:%M:%S")
                 })
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(result).encode())
+                self.send_json(result)
             else:
-                self.send_response(404)
-                self.end_headers()
+                self.send_error(404, "Tool not found")
         else:
             self.send_error(404)
 
@@ -356,84 +336,47 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers['Content-Length'])
                 data = json.loads(self.rfile.read(length).decode('utf-8'))
                 update_config(data.get('url', API_URL), data.get('model', MODEL), data.get('key', API_KEY))
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'{"status":"ok"}')
+                self.send_json({"status": "ok"})
             except:
-                self.send_response(400)
-                self.end_headers()
+                self.send_error(400)
         else:
             self.send_error(404)
 
-    def log_message(self, *args):
-        pass
+    def send_json(self, data):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, default=str).encode())
 
+    def log_message(self, format, *args):
+        pass # Suppress default logging
 
 def run_web():
     print(f"\n🌐 Web server running at http://localhost:{WEB_PORT}")
     print("   Open browser → Config tab to change API settings anytime")
-    server = HTTPServer(('', WEB_PORT), Handler)
-    server.serve_forever()
-
+    # ThreadingHTTPServer allows multiple requests (e.g., config checks while chatting)
+    server = ThreadingHTTPServer(('', WEB_PORT), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping server...")
+        server.server_close()
 
 # ====================== CLI MODE ======================
 def run_cli():
     print("\n=== CLI Mode ===")
-    print("Commands: config | test | tools | exit\n")
     while True:
-        try:
-            user = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye.")
-            break
-        if user.lower() in ("exit", "quit", "bye"):
-            print("Goodbye!")
-            break
-        if not user:
-            continue
-
-        if user.lower() == "config":
-            print("\n=== Current Configuration ===")
-            print(f"URL   : {API_URL}")
-            print(f"Model : {MODEL}")
-            print(f"Key   : {'******' if API_KEY else '(empty)'}")
-            print("\nEnter new values (press Enter to keep current):")
-            new_url = input(f"URL   [{API_URL}]: ").strip() or API_URL
-            new_model = input(f"Model [{MODEL}]: ").strip() or MODEL
-            new_key = input(f"Key   [{'******' if API_KEY else ''}]: ").strip()
-            if new_key == "": new_key = API_KEY
-            update_config(new_url, new_model, new_key)
-            continue
-
-        if user.lower() == "test":
-            test_single_tool()
-            continue
-        if user.lower() == "tools":
-            print("\n=== Tools Interactions Log ===")
-            if not TOOL_INTERACTIONS:
-                print("No tool calls yet.")
-            else:
-                for i, entry in enumerate(TOOL_INTERACTIONS, 1):
-                    print(f"{i}. [{entry['time']}] {entry['tool']}")
-                    print(f"   Args : {entry['args']}")
-                    print(f"   Result: {json.dumps(entry['result'], indent=2)}")
-                    print("-" * 60)
-            continue
-
+        try: user = input("You: ").strip()
+        except: break
+        if user.lower() in ("exit", "quit"): break
+        if not user: continue
+        
         HISTORY.append({"role": "user", "content": user})
         process_turn(HISTORY)
 
-
 # ====================== START ======================
 if __name__ == "__main__":
-    print("Choose mode:")
-    print("1. CLI mode")
-    print("2. Web mode (with Config tab)")
-    mode = input("Enter 1 or 2: ").strip()
-
-    if mode == "1":
+    if len(sys.argv) > 1 and sys.argv[1] == "cli":
         run_cli()
-    elif mode == "2":
-        run_web()
     else:
-        print("Invalid choice. Exiting.")
+        run_web()
