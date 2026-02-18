@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Llama Agent</title>
+    <style>
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: #f0f4f8; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1200px; margin: auto; background: white; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #2c3e50, #34495e); color: white; padding: 20px; text-align: center; font-size: 1.6em; font-weight: bold; letter-spacing: 1px; }
+        .tabs { display: flex; flex-wrap: wrap; border-bottom: 2px solid #e0e0e0; background: #f8f9fa; }
+        .tab { padding: 14px 28px; cursor: pointer; transition: all 0.3s; border-right: 1px solid #e0e0e0; }
+        .tab:hover { background: #e9ecef; }
+        .tab.active { background: white; border-bottom: 4px solid #007bff; font-weight: bold; color: #007bff; }
+        .tab-content { display: none; padding: 25px; min-height: 60vh; }
+        .tab-content.active { display: block; }
+        #chat { height: 55vh; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e0e0e0; }
+        .message { padding: 12px 18px; border-radius: 12px; max-width: 80%; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .user { align-self: flex-end; background: #007bff; color: white; }
+        .assistant { align-self: flex-start; background: white; border: 1px solid #ddd; white-space: pre-wrap; }
+        .tool-used { align-self: flex-start; background: #e6f4ea; border-left: 4px solid #28a745; color: #155724; }
+        .input-area { padding: 15px; display: flex; gap: 10px; background: white; border-top: 1px solid #eee; }
+        textarea { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 8px; resize: vertical; min-height: 50px; transition: border 0.3s; }
+        textarea:focus { border-color: #007bff; outline: none; }
+        button { padding: 12px 24px; background: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; transition: background 0.3s; }
+        button:hover { background: #0056b3; }
+        .log { font-family: monospace; font-size: 0.95em; background: #f8f9fa; padding: 20px; border-radius: 8px; white-space: pre-wrap; border: 1px solid #e0e0e0; }
+        .tester { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .config-form { display: grid; grid-template-columns: 1fr 2fr; gap: 15px; max-width: 600px; }
+        .config-form label { font-weight: bold; align-self: center; }
+        .config-form input { padding: 10px; border: 1px solid #ccc; border-radius: 6px; transition: border 0.3s; }
+        .config-form input:focus { border-color: #007bff; }
+        .config-form button { grid-column: span 2; justify-self: start; }
+
+        /* Mobile View */
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .container { border-radius: 8px; }
+            .header { font-size: 1.4em; padding: 15px; }
+            .tabs { flex-direction: column; }
+            .tab { padding: 12px; border-right: none; border-bottom: 1px solid #e0e0e0; }
+            .tab:last-child { border-bottom: none; }
+            #chat { height: 50vh; padding: 15px; }
+            .input-area { flex-direction: column; }
+            textarea { min-height: 80px; }
+            .config-form { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">Local Llama Agent</div>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab(0)">Chat</div>
+        <div class="tab" onclick="switchTab(1)">Tools Interactions</div>
+        <div class="tab" onclick="switchTab(2)">Tool Testing</div>
+        <div class="tab" onclick="switchTab(3)">API Config</div>
+        <div class="tab" onclick="switchTab(4)">Sampling Settings</div>
+    </div>
+
+    <!-- Chat Tab -->
+    <div id="tab0" class="tab-content active">
+        <div id="chat">
+            <div class="message assistant">Hello! I am ready.</div>
+        </div>
+        <div class="input-area">
+            <textarea id="input" placeholder="Type your message..."></textarea>
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <!-- Tools Interactions Tab -->
+    <div id="tab1" class="tab-content">
+        <button onclick="refreshLog()">Refresh Log</button>
+        <div id="log" class="log"></div>
+    </div>
+
+    <!-- Tool Testing Tab -->
+    <div id="tab2" class="tab-content">
+        <div class="tester">
+            <select id="tool-select"></select>
+            <input id="tool-args" placeholder='{"query": "test"}' style="width:300px;padding:8px;">
+            <button onclick="testTool()">Test Tool</button>
+        </div>
+        <pre id="test-result" class="log" style="display:none;"></pre>
+    </div>
+
+    <!-- API Config Tab -->
+    <div id="tab3" class="tab-content">
+        <form class="config-form" onsubmit="return false;">
+            <label for="api-url">API Base URL:</label>
+            <input id="api-url" type="text" placeholder="https://api.example.com/v1">
+            <label for="model">Model Name:</label>
+            <input id="model" type="text" placeholder="llama-3.1-8b-instruct">
+            <label for="api-key">API Key:</label>
+            <input id="api-key" type="text" placeholder="Leave empty for local">
+            <button onclick="saveApiConfig()">Save API Config</button>
+        </form>
+    </div>
+
+    <!-- Sampling Settings Tab -->
+    <div id="tab4" class="tab-content">
+        <form class="config-form" onsubmit="return false;">
+            <label for="temperature">Temperature:</label>
+            <input id="temperature" type="number" step="0.1" placeholder="0.7">
+            <label for="top-p">Top P:</label>
+            <input id="top-p" type="number" step="0.01" placeholder="0.95">
+            <label for="max-tokens">Max Tokens:</label>
+            <input id="max-tokens" type="number" placeholder="4096">
+            <button onclick="saveSampling()">Save Sampling Settings</button>
+        </form>
+    </div>
+</div>
+
+<script>
+    let currentTab = 0;
+    const tabs = document.querySelectorAll('.tab');
+    const contents = document.querySelectorAll('.tab-content');
+
+    function switchTab(n) {
+        tabs.forEach(t => t.classList.remove('active'));
+        contents.forEach(c => c.classList.remove('active'));
+        tabs[n].classList.add('active');
+        contents[n].classList.add('active');
+        if (n === 1) refreshLog();
+    }
+
+    function addMessage(text, cls) {
+        const chat = document.getElementById('chat');
+        const div = document.createElement('div');
+        div.className = `message ${cls}`;
+        div.textContent = text;
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function sendMessage() {
+        const input = document.getElementById('input');
+        const text = input.value.trim();
+        if (!text) return;
+        addMessage(text, 'user');
+        input.value = '';
+
+        const evt = new EventSource(`/chat?prompt=${encodeURIComponent(text)}`);
+
+        evt.onmessage = e => {
+            if (e.data === '[DONE]') { evt.close(); return; }
+            if (e.data.includes('🔧 Used tool:')) {
+                addMessage(e.data, 'tool-used');
+            } else if (e.data.includes('Connecting') || e.data.includes('Connected') || e.data.includes('tokens/s')) {
+                const last = document.querySelector('#chat .assistant:last-child');
+                if (last) last.textContent += '\n' + e.data;
+                else addMessage(e.data, 'assistant');
+            } else {
+                const last = document.querySelector('#chat .assistant:last-child');
+                if (last) last.textContent += e.data;
+                else addMessage(e.data, 'assistant');
+            }
+        };
+    }
+
+    async function refreshLog() {
+        const res = await fetch('/tool-log');
+        const log = await res.json();
+        const div = document.getElementById('log');
+        let html = '';
+        log.forEach(entry => {
+            html += `<strong>${entry.time} — ${entry.tool}</strong><br>`;
+            html += `Args: ${JSON.stringify(entry.args)}<br>`;
+            html += `Result: ${JSON.stringify(entry.result, null, 2)}<br><hr>`;
+        });
+        div.innerHTML = html || 'No tool interactions yet.';
+    }
+
+    async function loadTools() {
+        const res = await fetch('/tools');
+        const list = await res.json();
+        const select = document.getElementById('tool-select');
+        list.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t; opt.textContent = t;
+            select.appendChild(opt);
+        });
+    }
+
+    async function testTool() {
+        const tool = document.getElementById('tool-select').value;
+        const argsStr = document.getElementById('tool-args').value.trim() || '{}';
+        const res = await fetch(`/test?tool=${tool}&args=${encodeURIComponent(argsStr)}`);
+        const data = await res.json();
+        const pre = document.getElementById('test-result');
+        pre.textContent = JSON.stringify(data, null, 2);
+        pre.style.display = 'block';
+        refreshLog(); // also update log tab
+    }
+
+    function getCookie(name) {
+        const value = `; ${document.cookie}`;
+        const parts = value.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
+    }
+
+    function setCookie(name, value, days = 30) {
+        const date = new Date();
+        date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+        document.cookie = `${name}=${value}; expires=${date.toUTCString()}; path=/`;
+    }
+
+    async function loadConfig() {
+        const res = await fetch('/config');
+        const serverConfig = await res.json();
+
+        // Load from cookies or use server defaults
+        document.getElementById('api-url').value = getCookie('api_url') || serverConfig.api_url;
+        document.getElementById('model').value = getCookie('model') || serverConfig.model;
+        document.getElementById('api-key').value = getCookie('api_key') || serverConfig.api_key;
+        document.getElementById('temperature').value = getCookie('temperature') || serverConfig.temperature;
+        document.getElementById('top-p').value = getCookie('top_p') || serverConfig.top_p;
+        document.getElementById('max-tokens').value = getCookie('max_tokens') || serverConfig.max_tokens;
+
+        // Sync to server
+        await saveAllConfig();
+    }
+
+    async function saveApiConfig() {
+        const api_url = document.getElementById('api-url').value;
+        const model = document.getElementById('model').value;
+        const api_key = document.getElementById('api-key').value;
+        setCookie('api_url', api_url);
+        setCookie('model', model);
+        setCookie('api_key', api_key);
+        await fetch('/set_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_url, model, api_key })
+        });
+        alert('API Config saved!');
+    }
+
+    async function saveSampling() {
+        const temperature = document.getElementById('temperature').value;
+        const top_p = document.getElementById('top-p').value;
+        const max_tokens = document.getElementById('max-tokens').value;
+        setCookie('temperature', temperature);
+        setCookie('top_p', top_p);
+        setCookie('max_tokens', max_tokens);
+        await fetch('/set_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ temperature, top_p, max_tokens })
+        });
+        alert('Sampling Settings saved!');
+    }
+
+    async function saveAllConfig() {
+        const api_url = document.getElementById('api-url').value;
+        const model = document.getElementById('model').value;
+        const api_key = document.getElementById('api-key').value;
+        const temperature = document.getElementById('temperature').value;
+        const top_p = document.getElementById('top-p').value;
+        const max_tokens = document.getElementById('max-tokens').value;
+        await fetch('/set_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_url, model, api_key, temperature, top_p, max_tokens })
+        });
+    }
+
+    document.getElementById('input').addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    loadTools();
+    loadConfig();
+</script>
+</body>
+</html>
