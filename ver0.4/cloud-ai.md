@@ -1,7 +1,5 @@
 For **truly free ongoing usage** (no exhaustion surprises), switch to one of these reliable free-tier providers below.
 
-### Recommended Free Alternatives (Copy-Paste Ready for Your Script)
-
 | Provider          | Base URL (paste exactly)                              | Recommended Free Model                  | Free Tier (Feb 2026)                  | Get Key Here |
 |-------------------|-------------------------------------------------------|-----------------------------------------|---------------------------------------|--------------|
 | **Groq** (fastest) | `https://api.groq.com/openai/v1`                     | `llama-3.3-70b-versatile`              | Thousands of requests/day             | console.groq.com |
@@ -10,9 +8,9 @@ For **truly free ongoing usage** (no exhaustion surprises), switch to one of the
 | **Cerebras**      | `https://api.cerebras.ai/v1`                          | `llama-3.1-70b`                        | 1 million tokens per day              | cloud.cerebras.ai |
 | **Mistral**       | `https://api.mistral.ai/v1`                           | `mistral-small-latest`                 | Generous experiment tier              | console.mistral.ai |
 
-### How to Switch in Your Script (`ai3.py`)
+### How to Switch in Script (`cloud-ai.py`)
 1. Type `exit` at the "You:" prompt to quit CLI mode.
-2. Re-run the script: `python ai3.py`
+2. Re-run the script: `python cloud-ai.py`
 3. When it asks for **API Base URL**, paste one from the table above.
 4. Enter the matching **Model name**.
 5. Paste your new free API key.
